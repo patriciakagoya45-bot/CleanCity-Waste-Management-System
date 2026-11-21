@@ -52,7 +52,7 @@ const resources = {
     icon: "♻",
     description: "Track household collections, waste weights, and service fees.",
     endpoint: "/api/pickups",
-    columns: ["_id", "household_id", "collector_id", "dumpsite_id", "pickup_date", "waste_type", "weight_kg", "status", "fee_ugx"],
+    columns: ["request_id", "household_id", "collector_id", "dumpsite_id", "pickup_date", "waste_type", "weight_kg", "status", "fee_ugx"],
     fields: [
       { name: "household_id", label: "Household ID", required: true },
       { name: "collector_id", label: "Collector ID", required: true },
@@ -99,6 +99,8 @@ let activeNavigation = "overview";
 let currentUser = null;
 let records = [];
 let editingId = null;
+let referenceData = { serviceAreas: {}, wastePricesUgx: {} };
+let referenceDataPromise = null;
 
 const displayName = (field, resource = resources[activeResource]) => {
   const configured = resource?.fields.find((item) => item.name === field);
@@ -154,6 +156,7 @@ const roleNavigation = {
     { key: "search-users", label: "Search users", icon: "⌕" },
     { key: "register-collector", label: "Register a collector", icon: "＋" },
     { key: "delete-user", label: "Delete a user", icon: "−" },
+    { key: "reset-user-password", label: "Reset a password", icon: "↻" },
     { key: "all-requests", label: "View all requests", icon: "▤" },
     { key: "assign-request", label: "Assign a request", icon: "↗" },
     { key: "reschedule-request", label: "Reschedule a request", icon: "◷" },
@@ -163,7 +166,8 @@ const roleNavigation = {
     { key: "all-complaints", label: "View all complaints", icon: "✉" },
     { key: "resolve-complaint", label: "Resolve a complaint", icon: "✓" },
     { key: "summary-report", label: "Summary report", icon: "▥" },
-    { key: "save-data", label: "Save data now", icon: "↓" }
+    { key: "save-data", label: "Save data now", icon: "↓" },
+    { key: "change-password", label: "Change password", icon: "⌑" }
   ],
   household: [
     { key: "request-pickup", label: "Request waste collection", icon: "♻" },
@@ -173,22 +177,26 @@ const roleNavigation = {
     { key: "my-payments", label: "View my payments", icon: "▧" },
     { key: "file-complaint", label: "File a complaint", icon: "✉" },
     { key: "my-complaints", label: "View my complaints", icon: "☷" },
-    { key: "update-address", label: "Update my address", icon: "⌖" }
+    { key: "update-address", label: "Update my address", icon: "⌖" },
+    { key: "change-password", label: "Change password", icon: "⌑" }
   ],
   collector: [
     { key: "assigned-requests", label: "Assigned requests & locations", icon: "▤" },
     { key: "mark-collected", label: "Mark a request collected", icon: "✓" },
     { key: "availability", label: "Toggle my availability", icon: "◉" },
-    { key: "collector-profile", label: "View my profile", icon: "♧" }
+    { key: "collector-profile", label: "View my profile", icon: "♧" },
+    { key: "change-password", label: "Change password", icon: "⌑" }
   ]
 };
 
 const renderRoleNavigation = () => {
   navigation.replaceChildren();
-  const items = roleNavigation[currentUser.role] || [];
+  const items = currentUser.mustChangePassword
+    ? [{ key: "change-password", label: "Change temporary password", icon: "⌑" }]
+    : roleNavigation[currentUser.role] || [];
   items.forEach((item, index) => {
-    if (currentUser.role === "administrator" && [0, 5, 9, 13].includes(index)) {
-      const sectionNames = { 0: "WORKSPACE", 5: "SERVICE OPERATIONS", 9: "FINANCE", 13: "INSIGHTS" };
+    if (currentUser.role === "administrator" && [0, 6, 10, 14].includes(index)) {
+      const sectionNames = { 0: "WORKSPACE", 6: "SERVICE OPERATIONS", 10: "FINANCE", 14: "INSIGHTS" };
       const heading = document.createElement("div");
       heading.className = "nav-label";
       heading.textContent = sectionNames[index];
@@ -233,7 +241,7 @@ const setRegistrationMode = () => {
   nameField.hidden = existing;
   nameField.querySelector("input").required = !existing;
   newFields.hidden = existing;
-  newFields.querySelectorAll("input").forEach((input) => {
+  newFields.querySelectorAll('input:not([type="hidden"]), select').forEach((input) => {
     input.required = !existing;
   });
   document.getElementById("registration-help").textContent = existing
@@ -241,6 +249,89 @@ const setRegistrationMode = () => {
     : "Use at least 10 characters. Your new household ID will be shown after registration.";
   document.querySelector("#register-form .auth-submit").textContent =
     existing ? "Activate household login" : "Register household";
+};
+
+const loadReferenceData = () => {
+  if (!referenceDataPromise) {
+    referenceDataPromise = request("/api/reference").then((result) => {
+      referenceData = result.data;
+      populateRegistrationDivisions();
+      return referenceData;
+    });
+  }
+  return referenceDataPromise;
+};
+
+const populateParishOptions = (parishSelect, division, selectedParish = "") => {
+  parishSelect.replaceChildren(new Option("Select a parish", ""));
+  (referenceData.serviceAreas[division] || []).forEach((parish) => {
+    parishSelect.add(new Option(parish, parish));
+  });
+  parishSelect.disabled = !division || !(referenceData.serviceAreas[division] || []).length;
+  parishSelect.value = selectedParish;
+};
+
+const fillParishes = (division, selectedParish = "") => {
+  populateParishOptions(
+    document.getElementById("registration-parish"),
+    division,
+    selectedParish
+  );
+};
+
+const populateRegistrationDivisions = () => {
+  const divisionSelect = document.getElementById("registration-division");
+  divisionSelect.replaceChildren(new Option("Select a division", ""));
+  Object.keys(referenceData.serviceAreas).sort().forEach((division) => {
+    divisionSelect.add(new Option(division, division));
+  });
+  fillParishes(divisionSelect.value);
+};
+
+const requestCurrentLocation = (form, button, status) => {
+  if (!navigator.geolocation) {
+    status.textContent = "This browser does not support GPS location.";
+    return;
+  }
+  button.disabled = true;
+  status.textContent = "Waiting for location permission…";
+  navigator.geolocation.getCurrentPosition((position) => {
+    form.elements.latitude.value = String(position.coords.latitude);
+    form.elements.longitude.value = String(position.coords.longitude);
+    status.textContent = `Location saved (${position.coords.latitude.toFixed(5)}, ${position.coords.longitude.toFixed(5)}).`;
+    button.disabled = false;
+  }, (error) => {
+    const messages = {
+      1: "Location permission was denied. You can continue without GPS.",
+      2: "Your location is unavailable. Try again or continue without GPS.",
+      3: "Location request timed out. Try again or continue without GPS."
+    };
+    status.textContent = messages[error.code] || "Unable to get your location.";
+    button.disabled = false;
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+};
+
+const attachGpsCapture = (form, initialLocation = {}) => {
+  const wrapper = makeElement("div", "auth-location");
+  wrapper.classList.add("full-width");
+  const button = makeElement("button", "button button-secondary", "Use my current location");
+  button.type = "button";
+  const status = makeElement("span", "auth-help", "GPS is optional. Your browser will ask permission.");
+  const latitude = document.createElement("input");
+  latitude.type = "hidden";
+  latitude.name = "latitude";
+  latitude.value = initialLocation.latitude ?? "";
+  const longitude = document.createElement("input");
+  longitude.type = "hidden";
+  longitude.name = "longitude";
+  longitude.value = initialLocation.longitude ?? "";
+  if (latitude.value && longitude.value) {
+    status.textContent = `Saved location (${Number(latitude.value).toFixed(5)}, ${Number(longitude.value).toFixed(5)}).`;
+  }
+  button.addEventListener("click", () => requestCurrentLocation(form, button, status));
+  wrapper.append(button, status, latitude, longitude);
+  form.insertBefore(wrapper, form.querySelector(".portal-form-actions"));
+  return { button, status, latitude, longitude };
 };
 
 const showAuthentication = (message = "") => {
@@ -267,7 +358,9 @@ const enterPortal = (account, message = "") => {
   renderRoleNavigation();
   setNotice("");
 
-  if (account.role === "administrator") {
+  if (account.mustChangePassword) {
+    openPortalAction("change-password");
+  } else if (account.role === "administrator") {
     showOverview("dashboard");
   } else {
     openPortalAction(`${account.role}-home`);
@@ -315,7 +408,9 @@ const submitRegistration = async (event) => {
   const payload = {
     email,
     password,
-    phone: String(data.get("phone") || "").trim()
+    phone: String(data.get("phone") || "").trim(),
+    latitude: String(data.get("latitude") || ""),
+    longitude: String(data.get("longitude") || "")
   };
   let endpoint = "/api/auth/register/household";
   if (mode === "existing") {
@@ -330,6 +425,7 @@ const submitRegistration = async (event) => {
   button.disabled = true;
   button.textContent = "Registering…";
   try {
+    await loadReferenceData();
     await request(endpoint, { method: "POST", body: JSON.stringify(payload) });
     await authenticate(mode === "existing" ? id : email, password);
     form.reset();
@@ -465,6 +561,7 @@ const renderPortalForm = (title, description, fields, onSubmit, submitLabel = "S
   const form = makeElement("form", "portal-form");
   fields.forEach((field) => {
     const wrapper = makeElement("div", `field${field.full ? " full-width" : ""}`);
+    if (field.type === "checkbox") wrapper.classList.add("checkbox-field");
     const label = makeElement("label", "", field.label);
     const input = document.createElement(field.type === "textarea" ? "textarea" : "input");
     input.name = field.name;
@@ -484,6 +581,7 @@ const renderPortalForm = (title, description, fields, onSubmit, submitLabel = "S
         select.append(opt);
       });
       if (field.value !== undefined) select.value = field.value;
+      select.disabled = Boolean(field.disabled);
       label.htmlFor = select.id;
       wrapper.append(label, select);
     } else {
@@ -492,6 +590,7 @@ const renderPortalForm = (title, description, fields, onSubmit, submitLabel = "S
       if (field.step) input.step = field.step;
       if (field.maxLength) input.maxLength = field.maxLength;
       if (field.minLength) input.minLength = field.minLength;
+      if (field.placeholder) input.placeholder = field.placeholder;
       if (field.value !== undefined) input.value = field.value;
       label.htmlFor = input.id;
       wrapper.append(label, input);
@@ -738,6 +837,50 @@ const renderRecentPickups = (pickups, households) => {
   });
 };
 
+const renderAdminDashboardUpgrade = async () => {
+  const upgrade = document.getElementById("admin-dashboard-upgrade");
+  const subtitle = document.getElementById("overview-subtitle");
+  if (!upgrade) return;
+  if (currentUser?.role !== "administrator") {
+    upgrade.hidden = true;
+    upgrade.replaceChildren();
+    if (subtitle) subtitle.textContent = "Monitor collection activity and manage your waste services.";
+    return;
+  }
+
+  const report = (await request("/api/admin/report")).data;
+  if (subtitle) subtitle.textContent = "Monitor collection activity and quickly access key CleanCity service information.";
+  upgrade.hidden = false;
+  upgrade.replaceChildren();
+
+  const welcome = makeElement("section", "household-welcome");
+  welcome.append(
+    makeElement("h2", "", `Welcome, ${currentUser.name}`),
+    makeElement("p", "", "Here is your administrator dashboard overview and quick access to key service areas.")
+  );
+
+  const grid = makeElement("div", "portal-summary-grid household-summary-grid");
+  const registeredUsers = (report.users.household || 0) + (report.users.collector || 0);
+  const activeRequests = (report.requests.requested || 0) + (report.requests.pending || 0) + (report.requests.assigned || 0);
+  const openComplaints = Object.entries(report.complaints || {})
+    .filter(([status]) => !/resolved|closed/i.test(status))
+    .reduce((sum, [, count]) => sum + count, 0);
+  [
+    { label: "Registered users", hint: "Households and staff", value: registeredUsers.toLocaleString(), action: "list-users" },
+    { label: "Active requests", hint: "Pending or assigned", value: activeRequests.toLocaleString(), action: "all-requests" },
+    { label: "Payments received", hint: "Paid collection fees", value: money(report.payments?.totalUgx || 0), action: "all-payments" },
+    { label: "Open complaints", hint: "Waiting for resolution", value: openComplaints.toLocaleString(), action: "all-complaints" }
+  ].forEach(({ label, hint, value, action }) => {
+    const card = makeElement("button", "portal-summary portal-summary-action");
+    card.type = "button";
+    card.append(makeElement("span", "", label), makeElement("strong", "", String(value)), makeElement("small", "", hint));
+    card.addEventListener("click", () => openPortalAction(action));
+    grid.append(card);
+  });
+
+  upgrade.append(welcome, grid);
+};
+
 const showOverview = async (navId = "overview") => {
   activeResource = null;
   activeNavigation = navId;
@@ -749,12 +892,26 @@ const showOverview = async (navId = "overview") => {
   setNotice("");
 
   try {
-    const responses = await Promise.all(
-      Object.entries(resources).map(async ([key, resource]) => [
-        key,
-        (await request(resource.endpoint)).data
-      ])
-    );
+    const tasks = [
+      Promise.all(
+        Object.entries(resources).map(async ([key, resource]) => [
+          key,
+          (await request(resource.endpoint)).data
+        ])
+      )
+    ];
+    if (currentUser?.role === "administrator") tasks.push(renderAdminDashboardUpgrade());
+    else {
+      const upgrade = document.getElementById("admin-dashboard-upgrade");
+      const subtitle = document.getElementById("overview-subtitle");
+      if (upgrade) {
+        upgrade.hidden = true;
+        upgrade.replaceChildren();
+      }
+      if (subtitle) subtitle.textContent = "Monitor collection activity and manage your waste services.";
+    }
+
+    const [responses] = await Promise.all(tasks);
     const data = Object.fromEntries(responses);
     const totalWeight = data.pickups.reduce((sum, pickup) => {
       const weight = Number(pickup.weight_kg);
@@ -776,6 +933,11 @@ const showOverview = async (navId = "overview") => {
     ["count-weight", "count-pickups", "count-collectors", "count-dumpsites"].forEach((id) => {
       document.getElementById(id).textContent = "—";
     });
+    const upgrade = document.getElementById("admin-dashboard-upgrade");
+    if (upgrade) {
+      upgrade.hidden = true;
+      upgrade.replaceChildren();
+    }
     setNotice(error.message);
   }
 };
@@ -1036,10 +1198,44 @@ const loadAdminUsers = async (query = "") => {
   }]);
 };
 
+const renderAdminPasswordReset = async () => {
+  const users = (await request("/api/admin/users")).data;
+  const resettableUsers = users.filter((user) => user.active !== false && user.id !== currentUser.id);
+  renderPortalForm("Reset a user's password", "Verify the person against their registered ID and phone in person or by a trusted call before issuing a temporary password.", [
+    {
+      name: "accountId",
+      label: "User account",
+      required: true,
+      type: "select",
+      options: resettableUsers.map((user) => ({
+        value: user.id,
+        label: `${user.name} · ${user.loginId} · ${user.role}`
+      }))
+    },
+    {
+      name: "identityVerified",
+      label: "I verified this user's identity and registered contact details",
+      type: "checkbox",
+      required: true,
+      full: true
+    }
+  ], async ({ accountId, identityVerified }) => {
+    const result = await request(`/api/admin/users/${encodeURIComponent(accountId)}/reset-password`, {
+      method: "POST",
+      body: JSON.stringify({ identityVerified: identityVerified === "on" })
+    });
+    const account = result.data.account;
+    setNotice(
+      `Temporary password for ${account.name} (${account.loginId}): ${result.data.temporaryPassword}. Give it only to the verified user; they must change it after signing in.`,
+      "success"
+    );
+  }, "Generate temporary password");
+};
+
 const loadAdminRequests = async () => {
   const requests = (await request("/api/admin/requests")).data;
   renderPortalTable("All collection requests", requests, [
-    { label: "Request ID", value: "_id" },
+    { label: "Request ID", value: "request_id" },
     { label: "Household", value: (row) => row.household?.HouseholdName || row.household_id, primary: true },
     { label: "Location", value: (row) => row.household ? `${row.household.address}, ${row.household.parish}` : "—" },
     { label: "Contact", value: (row) => row.household?.phone || "—" },
@@ -1112,7 +1308,7 @@ const renderRequestSelection = async (requestId, action) => {
         value: requestId || "",
         options: requests.map((item) => ({
           value: item._id,
-          label: `${item._id} · ${item.household?.HouseholdName || item.household_id} · ${item.status}`
+          label: `${item.request_id || item._id} · ${item.household?.HouseholdName || item.household_id} · ${item.status}`
         }))
       },
       {
@@ -1143,7 +1339,7 @@ const renderRequestSelection = async (requestId, action) => {
         value: requestId || "",
         options: requests.map((item) => ({
           value: item._id,
-          label: `${item._id} · ${item.household?.HouseholdName || item.household_id}`
+          label: `${item.request_id || item._id} · ${item.household?.HouseholdName || item.household_id}`
         }))
       },
       { name: "pickup_date", label: "New pickup date", required: true, type: "date", value: selected ? dateInputValue(selected.pickup_date) : "" }
@@ -1166,7 +1362,7 @@ const renderRequestSelection = async (requestId, action) => {
       value: requestId || "",
       options: requests.map((item) => ({
         value: item._id,
-        label: `${item._id} · ${item.household?.HouseholdName || item.household_id}`
+        label: `${item.request_id || item._id} · ${item.household?.HouseholdName || item.household_id}`
       }))
     },
     {
@@ -1199,8 +1395,8 @@ const renderRequestSelection = async (requestId, action) => {
 const renderAdminPayments = async () => {
   const payments = (await request("/api/admin/payments")).data;
   renderPortalTable("All payments", payments, [
-    { label: "Payment ID", value: "_id" },
-    { label: "Request ID", value: "pickup_id" },
+    { label: "Payment ID", value: (row) => row.payment_id || row._id },
+    { label: "Request ID", value: "request_id" },
     { label: "Household ID", value: "household_id" },
     { label: "Amount", value: "amount_ugx", format: money },
     { label: "Method", value: "method" },
@@ -1220,7 +1416,7 @@ const renderRecordPayment = async () => {
       options: requests.filter((item) => item.fee_ugx > 0 && !/cancelled/i.test(item.status))
         .map((item) => ({
           value: item._id,
-          label: `${item._id} · ${item.household?.HouseholdName || item.household_id} · fee ${money(item.fee_ugx)}`
+          label: `${item.request_id || item._id} · ${item.household?.HouseholdName || item.household_id} · fee ${money(item.fee_ugx)}`
         }))
     },
     { name: "amount_ugx", label: "Amount (UGX)", required: true, type: "number", min: 1, step: "any" },
@@ -1264,7 +1460,7 @@ const renderAdminReport = async () => {
 };
 
 const householdRequestColumns = [
-  { label: "Request ID", value: "_id" },
+  { label: "Request ID", value: "request_id" },
   { label: "Waste type", value: "waste_type", primary: true },
   { label: "Pickup date", value: "pickup_date", format: (value) => formatValue("pickup_date", value) },
   { label: "Status", value: "status", status: true },
@@ -1285,7 +1481,7 @@ const loadHouseholdRequests = async (showActions = true) => {
     {
       label: "Pay",
       when: (row) => row.fee_ugx > (paidByRequest.get(row._id) || 0) && !/cancelled/i.test(row.status),
-      run: (row) => openPortalAction("pay-request", row._id)
+      run: (row) => openPortalAction("pay-request", row.request_id)
     },
     {
       label: "Cancel",
@@ -1315,22 +1511,38 @@ const renderHouseholdPay = async (requestId) => {
   const eligible = requests.filter((item) =>
     item.fee_ugx > (paidByRequest.get(item._id) || 0) && !/cancelled/i.test(item.status)
   );
-  const options = eligible.map((item) => ({
-    value: item._id,
-    label: `${item._id} · ${item.waste_type} · due ${money(item.fee_ugx - (paidByRequest.get(item._id) || 0))}`
-  }));
-  renderPortalForm("Pay for a collection request", "Choose a request with an outstanding fee and select your payment method.", [
-    { name: "request_id", label: "Request", required: true, type: "select", value: requestId || "", options },
+  const eligibleById = new Map(eligible.map((item) => [
+    String(item.request_id || "").toUpperCase(),
+    item
+  ]));
+  const form = renderPortalForm("Pay for a collection request", "Enter the request ID shown on your pickup, such as REQ001.", [
+    { name: "request_id", label: "Request ID", required: true, type: "text", value: requestId || "", placeholder: "REQ001", maxLength: 32 },
     { name: "method", label: "Payment method", required: true, type: "select", options: ["Cash", "Mobile Money", "Bank"].map((item) => ({ value: item, label: item })) },
     { name: "reference", label: "Payment reference (optional)" }
   ], async ({ request_id, method, reference }) => {
-    await request(`/api/portal/household/requests/${encodeURIComponent(request_id)}/pay`, {
+    const normalizedId = request_id.trim().toUpperCase();
+    const selected = eligibleById.get(normalizedId);
+    if (!selected) {
+      throw new Error("That request ID does not have an outstanding balance on your account.");
+    }
+    await request(`/api/portal/household/requests/${encodeURIComponent(normalizedId)}/pay`, {
       method: "POST",
       body: JSON.stringify({ method, reference })
     });
-    setNotice("Payment recorded successfully.", "success");
-    await loadHouseholdPayments();
+    await openPortalAction("my-payments");
+    setNotice(`Payment recorded successfully for ${normalizedId}.`, "success");
   }, "Pay outstanding amount");
+  const amountPreview = makeElement("p", "payment-preview", "Enter a request ID to see the balance.");
+  const updatePreview = () => {
+    const selected = eligibleById.get(form.elements.request_id.value.trim().toUpperCase());
+    amountPreview.textContent = selected
+      ? `${selected.waste_type} collection fee: ${money(selected.fee_ugx - (paidByRequest.get(selected._id) || 0))}`
+      : "Enter a valid request ID with an outstanding balance.";
+    amountPreview.classList.toggle("is-invalid", !selected && Boolean(form.elements.request_id.value.trim()));
+  };
+  form.querySelector(".portal-form-actions").before(amountPreview);
+  form.elements.request_id.addEventListener("input", updatePreview);
+  updatePreview();
   if (!eligible.length) {
     portalContent.append(makeElement("p", "portal-empty", "There are no requests with an outstanding fee. Contact the administrator if a request fee has not been added."));
   }
@@ -1339,8 +1551,8 @@ const renderHouseholdPay = async (requestId) => {
 const loadHouseholdPayments = async () => {
   const payments = (await request("/api/portal/household/payments")).data;
   renderPortalTable("My payments", payments, [
-    { label: "Payment ID", value: "_id" },
-    { label: "Request ID", value: "pickup_id" },
+    { label: "Payment ID", value: (row) => row.payment_id || row._id },
+    { label: "Request ID", value: (row) => row.request_id || row.pickup_id },
     { label: "Amount", value: "amount_ugx", format: money },
     { label: "Method", value: "method" },
     { label: "Paid on", value: "payment_date", format: (value) => formatValue("payment_date", value) },
@@ -1361,7 +1573,7 @@ const renderHouseholdComplaints = async () => {
 const renderAssignedRequests = async () => {
   const requests = (await request("/api/portal/collector/requests")).data;
   renderPortalTable("My assigned requests", requests, [
-    { label: "Request ID", value: "_id" },
+    { label: "Request ID", value: "request_id" },
     { label: "Household", value: (row) => row.household?.HouseholdName || row.household_id, primary: true },
     { label: "Address", value: (row) => row.household ? `${row.household.address}, ${row.household.parish}, ${row.household.division}` : "—" },
     { label: "Contact", value: (row) => row.household?.phone || "—" },
@@ -1382,7 +1594,7 @@ const renderCollectorProfile = async () => {
   heading.append(makeElement("div", ""));
   heading.firstChild.append(
     makeElement("h2", "", "My collector profile"),
-    makeElement("p", "", `Collector ID: ${profile._id}`)
+    makeElement("p", "", `Collector ID: ${profile.collector_id || profile._id}`)
   );
   const availability = makeElement("span", "status-pill", profile.active ? "Available" : "Unavailable");
   heading.append(availability);
@@ -1409,11 +1621,26 @@ const renderHouseholdHome = async () => {
     request("/api/portal/household/requests").then((result) => result.data),
     request("/api/portal/household/payments").then((result) => result.data)
   ]);
-  const cards = makeElement("div", "portal-summary-grid");
+  const paidByRequest = new Map();
+  payments.forEach((payment) => {
+    if (payment.status !== "void") {
+      paidByRequest.set(payment.pickup_id, (paidByRequest.get(payment.pickup_id) || 0) + payment.amount_ugx);
+    }
+  });
+  const outstanding = requests.reduce((sum, item) =>
+    sum + (/cancelled/i.test(item.status) ? 0 : Math.max(0, item.fee_ugx - (paidByRequest.get(item._id) || 0))), 0);
+  const cards = makeElement("div", "portal-summary-grid household-summary-grid");
+  const welcome = makeElement("section", "household-welcome");
+  welcome.append(
+    makeElement("h2", "", `Welcome, ${profile.HouseholdName}`),
+    makeElement("p", "", "Here is your CleanCity household dashboard and activity overview.")
+  );
+  portalContent.append(welcome);
   [
-    ["My collection requests", requests.length],
-    ["Open requests", requests.filter((item) => !/completed|collected|cancelled/i.test(item.status)).length],
-    ["Payments recorded", payments.length]
+    ["Total requests", requests.length],
+    ["In progress", requests.filter((item) => /requested|assigned|scheduled/i.test(item.status)).length],
+    ["Collected", requests.filter((item) => /collected|completed/i.test(item.status)).length],
+    ["Outstanding", money(outstanding)]
   ].forEach(([label, value]) => {
     const card = makeElement("article", "portal-summary");
     card.append(makeElement("span", "", label), makeElement("strong", "", value));
@@ -1423,7 +1650,7 @@ const renderHouseholdHome = async () => {
   const profileCard = makeElement("section", "portal-card");
   const heading = makeElement("div", "portal-card-heading");
   heading.append(makeElement("div", ""));
-  heading.firstChild.append(makeElement("h2", "", profile.HouseholdName), makeElement("p", "", `Household ID: ${profile._id}`));
+  heading.firstChild.append(makeElement("h2", "", "Household details"), makeElement("p", "", `Household ID: ${profile._id}`));
   profileCard.append(heading);
   const details = makeElement("div", "profile-grid");
   [["Address", profile.address], ["Parish", profile.parish], ["Division", profile.division], ["Phone", profile.phone], ["Plan", profile.plan], ["Email", currentUser.email]]
@@ -1433,7 +1660,64 @@ const renderHouseholdHome = async () => {
       details.append(item);
     });
   profileCard.append(details);
+  const locationCard = makeElement("section", "portal-card household-location-card");
+  const locationHeading = makeElement("div", "portal-card-heading");
+  const locationCopy = document.createElement("div");
+  locationCopy.append(
+    makeElement("h2", "", "Service location"),
+    makeElement("p", "", "Your division, parish, address, and optional GPS coordinates help collectors find you.")
+  );
+  locationHeading.append(locationCopy);
+  locationCard.append(locationHeading);
+  const locationDetails = makeElement("div", "profile-grid");
+  const coordinatesSet = profile.latitude !== undefined && profile.latitude !== null &&
+    profile.longitude !== undefined && profile.longitude !== null &&
+    Number.isFinite(Number(profile.latitude)) && Number.isFinite(Number(profile.longitude));
+  const locationText = coordinatesSet
+    ? `${Number(profile.latitude).toFixed(5)}, ${Number(profile.longitude).toFixed(5)}`
+    : "GPS location not set";
+  const gpsItem = makeElement("div", "profile-item");
+  gpsItem.append(makeElement("span", "", "GPS coordinates"));
+  gpsItem.append(makeElement("strong", "", locationText));
+  locationDetails.append(gpsItem);
+  const gpsActions = makeElement("div", "location-actions");
+  const gpsButton = makeElement("button", "button button-secondary", "Update GPS location");
+  gpsButton.type = "button";
+  const gpsStatus = makeElement("span", "auth-help", "GPS is optional and requires browser permission.");
+  gpsButton.addEventListener("click", () => {
+    if (!navigator.geolocation) {
+      gpsStatus.textContent = "This browser does not support GPS location.";
+      return;
+    }
+    gpsButton.disabled = true;
+    gpsStatus.textContent = "Waiting for location permission…";
+    navigator.geolocation.getCurrentPosition(async (position) => {
+      try {
+        await request("/api/portal/household/address", {
+          method: "PATCH",
+          body: JSON.stringify({
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude
+          })
+        });
+        await openPortalAction("household-home");
+        setNotice("GPS location updated.", "success");
+      } catch (error) {
+        setNotice(error.message);
+      } finally {
+        gpsButton.disabled = false;
+      }
+    }, (error) => {
+      gpsStatus.textContent = error.code === 1
+        ? "Location permission was denied."
+        : "Unable to get your location. Try again or continue without GPS.";
+      gpsButton.disabled = false;
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+  });
+  gpsActions.append(gpsButton, gpsStatus);
+  locationCard.append(locationDetails, gpsActions);
   portalContent.append(profileCard);
+  portalContent.append(locationCard);
 };
 
 const renderCollectorHome = async () => {
@@ -1441,6 +1725,12 @@ const renderCollectorHome = async () => {
     request("/api/portal/collector/profile").then((result) => result.data),
     request("/api/portal/collector/requests").then((result) => result.data)
   ]);
+  const welcome = makeElement("section", "household-welcome");
+  welcome.append(
+    makeElement("h2", "", `Welcome, ${profile.name}`),
+    makeElement("p", "", `Collector ID: ${profile.collector_id || profile._id}. Here is your assigned collection work and availability.`)
+  );
+  portalContent.append(welcome);
   const cards = makeElement("div", "portal-summary-grid");
   [
     ["Assigned requests", requests.length],
@@ -1455,14 +1745,47 @@ const renderCollectorHome = async () => {
   await renderAssignedRequests();
 };
 
+const renderAdminHome = async () => {
+  const report = (await request("/api/admin/report")).data;
+  const welcome = makeElement("section", "household-welcome");
+  welcome.append(
+    makeElement("h2", "", `Welcome, ${currentUser.name}`),
+    makeElement("p", "", "Use the dashboard below to quickly access key CleanCity service information.")
+  );
+  portalContent.append(welcome);
+
+  const grid = makeElement("div", "portal-summary-grid household-summary-grid");
+  const registeredUsers = (report.users.household || 0) + (report.users.collector || 0);
+  const activeRequests = (report.requests.requested || 0) + (report.requests.pending || 0) + (report.requests.assigned || 0);
+  const openComplaints = Object.entries(report.complaints || {})
+    .filter(([status]) => !/resolved|closed/i.test(status))
+    .reduce((sum, [, count]) => sum + count, 0);
+  const items = [
+    { label: "Registered users", hint: "Households and staff", value: registeredUsers.toLocaleString(), action: "list-users" },
+    { label: "Active requests", hint: "Pending or assigned", value: activeRequests.toLocaleString(), action: "all-requests" },
+    { label: "Payments received", hint: "Paid collection fees", value: money(report.payments?.totalUgx || 0), action: "all-payments" },
+    { label: "Open complaints", hint: "Waiting for resolution", value: openComplaints.toLocaleString(), action: "all-complaints" }
+  ];
+  items.forEach(({ label, hint, value, action }) => {
+    const card = makeElement("button", "portal-summary portal-summary-action");
+    card.type = "button";
+    card.append(makeElement("span", "", label), makeElement("strong", "", String(value)), makeElement("small", "", hint));
+    card.addEventListener("click", () => openPortalAction(action));
+    grid.append(card);
+  });
+  portalContent.append(grid);
+};
+
 const openPortalAction = async (action, recordId = "") => {
   const labels = {
+    "admin-home": ["Administrator dashboard", "Registered users, active requests, payments, and open complaints at a glance."],
     "household-home": ["Household dashboard", "Your collection requests, payments, and household details."],
     "collector-home": ["Collector dashboard", "Your assigned collection work and availability."],
     "list-users": ["List users", "Households, collectors, and administrators with CleanCity accounts."],
     "search-users": ["Search users", "Find registered users by name, ID, email, or role."],
     "register-collector": ["Register a collector", "Create a collector login or activate an existing collector ID."],
     "delete-user": ["Deactivate a user", "Disable an account login while retaining its service records."],
+    "reset-user-password": ["Reset a password", "Verify the user in person or through a trusted channel, then issue a temporary password."],
     "all-requests": ["All collection requests", "Assign collectors, reschedule visits, and track request status."],
     "assign-request": ["Assign a request", "Choose an active collector for a collection request."],
     "reschedule-request": ["Reschedule a request", "Change a household's planned collection date."],
@@ -1481,15 +1804,20 @@ const openPortalAction = async (action, recordId = "") => {
     "file-complaint": ["File a complaint", "Let CleanCity know about an issue with your waste service."],
     "my-complaints": ["My complaints", "Track the resolution status of your complaints."],
     "update-address": ["Update my address", "Keep your household service location up to date."],
+    "change-password": ["Change password", "Update your password or replace a temporary password."],
     "assigned-requests": ["Assigned requests & locations", "View household addresses and contact details for your assigned work."],
     "mark-collected": ["Mark a request collected", "Record a completed collection and its weight."],
     availability: ["Toggle my availability", "Set whether you can receive new collection assignments."],
     "collector-profile": ["My collector profile", "View your registered contact, vehicle, and service division."]
   };
+  if (currentUser.mustChangePassword && action !== "change-password") {
+    action = "change-password";
+  }
   const [title, description] = labels[action] || ["CleanCity portal", ""];
   actionHeader(action, title, description);
   try {
     switch (action) {
+      case "admin-home": return await showOverview("dashboard");
       case "household-home": return await renderHouseholdHome();
       case "collector-home": return await renderCollectorHome();
       case "list-users": return await loadAdminUsers();
@@ -1497,6 +1825,7 @@ const openPortalAction = async (action, recordId = "") => {
         renderUsersSearch();
         return await loadAdminUsers();
       case "register-collector": return renderCollectorRegistration();
+      case "reset-user-password": return await renderAdminPasswordReset();
       case "delete-user": return await loadAdminUsers();
       case "all-requests": return await loadAdminRequests();
       case "assign-request":
@@ -1514,15 +1843,51 @@ const openPortalAction = async (action, recordId = "") => {
         portalContent.append(card);
         return;
       }
+      case "change-password":
+        return renderPortalForm("Change your password", currentUser.mustChangePassword
+          ? "Your temporary password must be replaced before using the portal."
+          : "Use your current password to set a new password of at least 10 characters.", [
+          { name: "currentPassword", label: "Current password", required: true, type: "password" },
+          { name: "newPassword", label: "New password", required: true, type: "password", minLength: 10, maxLength: 128 },
+          { name: "confirmPassword", label: "Confirm new password", required: true, type: "password", minLength: 10, maxLength: 128 }
+        ], async (data) => {
+          if (data.newPassword !== data.confirmPassword) {
+            throw new Error("The new passwords do not match.");
+          }
+          await request("/api/auth/change-password", {
+            method: "POST",
+            body: JSON.stringify(data)
+          });
+          currentUser = { ...currentUser, mustChangePassword: false };
+          renderRoleNavigation();
+          if (currentUser.role === "administrator") {
+            await showOverview("dashboard");
+          } else {
+            await openPortalAction(`${currentUser.role}-home`);
+          }
+          setNotice("Password updated successfully.", "success");
+        }, "Update password");
       case "request-pickup":
-        return renderPortalForm("Request a pickup", "An administrator will assign a collector and confirm the request.", [
-          { name: "waste_type", label: "Waste type", required: true, type: "select", options: ["General", "Organic", "Plastic", "Paper", "Metal", "E-waste"].map((item) => ({ value: item.toLowerCase(), label: item })) },
+        {
+          await loadReferenceData();
+          const form = renderPortalForm("Request a pickup", "Choose a waste type to see the fixed collection fee before submitting.", [
+          { name: "waste_type", label: "Waste type", required: true, type: "select", options: Object.keys(referenceData.wastePricesUgx).map((item) => ({ value: item, label: item === "e-waste" ? "E-waste" : item[0].toUpperCase() + item.slice(1) })) },
           { name: "pickup_date", label: "Preferred pickup date", required: true, type: "date", value: dateInputValue(new Date()) }
         ], async (data) => {
-          await request("/api/portal/household/requests", { method: "POST", body: JSON.stringify(data) });
-          setNotice("Pickup request submitted.", "success");
+          const result = await request("/api/portal/household/requests", { method: "POST", body: JSON.stringify(data) });
+          setNotice(`Pickup request ${result.data.request_id} submitted. Fee: ${money(result.data.fee_ugx)}.`, "success");
           await loadHouseholdRequests();
         }, "Submit request");
+          const preview = makeElement("p", "payment-preview", "Select a waste type to see its fee.");
+          const updatePreview = () => {
+            const price = referenceData.wastePricesUgx[form.elements.waste_type.value];
+            preview.textContent = price === undefined ? "Select a waste type to see its fee." : `Fixed collection fee: ${money(price)}`;
+          };
+          form.querySelector(".portal-form-actions").before(preview);
+          form.elements.waste_type.addEventListener("change", updatePreview);
+          updatePreview();
+          return form;
+        }
       case "my-requests": return await loadHouseholdRequests();
       case "cancel-request": return await loadHouseholdRequests();
       case "pay-request": return await renderHouseholdPay(recordId);
@@ -1537,16 +1902,22 @@ const openPortalAction = async (action, recordId = "") => {
         }, "Submit complaint");
       case "my-complaints": return await renderHouseholdComplaints();
       case "update-address": {
+        await loadReferenceData();
         const profile = (await request("/api/portal/household/profile")).data;
-        return renderPortalForm("Update service address", "Update your collection address, division, or parish.", [
+        const form = renderPortalForm("Update service address", "Update your collection address, division, or parish.", [
           { name: "address", label: "Street / home address", required: true, value: profile.address },
-          { name: "division", label: "Division", required: true, value: profile.division },
-          { name: "parish", label: "Parish", required: true, value: profile.parish }
+          { name: "division", label: "Division", required: true, type: "select", value: profile.division, options: Object.keys(referenceData.serviceAreas).sort().map((item) => ({ value: item, label: item })) },
+          { name: "parish", label: "Parish", required: true, type: "select", value: profile.parish, options: (referenceData.serviceAreas[profile.division] || []).map((item) => ({ value: item, label: item })) }
         ], async (data) => {
           await request("/api/portal/household/address", { method: "PATCH", body: JSON.stringify(data) });
-          setNotice("Household address updated.", "success");
           await openPortalAction("household-home");
+          setNotice("Household address updated.", "success");
         }, "Update address");
+        form.elements.division.addEventListener("change", () => {
+          populateParishOptions(form.elements.parish, form.elements.division.value);
+        });
+        attachGpsCapture(form, profile);
+        return form;
       }
       case "assigned-requests": return await renderAssignedRequests();
       case "mark-collected": {
@@ -1561,7 +1932,7 @@ const openPortalAction = async (action, recordId = "") => {
             value: recordId,
             options: assigned.map((item) => ({
               value: item._id,
-              label: `${item._id} · ${item.household?.HouseholdName || item.household_id} · ${item.waste_type}`
+              label: `${item.request_id || item._id} · ${item.household?.HouseholdName || item.household_id} · ${item.waste_type}`
             }))
           },
           { name: "weight_kg", label: "Collected weight (kg)", required: true, type: "number", min: 0, step: "any" }
@@ -1637,12 +2008,25 @@ document.getElementById("cancel-dialog").addEventListener("click", () => recordD
 document.getElementById("login-tab").addEventListener("click", () => setAuthMode("login"));
 document.getElementById("register-tab").addEventListener("click", () => setAuthMode("register"));
 document.getElementById("registration-mode").addEventListener("change", setRegistrationMode);
+document.getElementById("registration-division").addEventListener("change", (event) => {
+  fillParishes(event.currentTarget.value);
+});
+document.getElementById("registration-gps-button").addEventListener("click", (event) => {
+  const form = document.getElementById("register-form");
+  requestCurrentLocation(form, event.currentTarget, document.getElementById("registration-gps-status"));
+});
 document.getElementById("login-form").addEventListener("submit", submitLogin);
 document.getElementById("register-form").addEventListener("submit", submitRegistration);
 document.getElementById("logout-button").addEventListener("click", signOut);
 
 renderCollectionCards();
 setRegistrationMode();
+loadReferenceData()
+  .catch((error) => {
+    const message = document.getElementById("auth-error");
+    message.textContent = `Unable to load service areas and pricing: ${error.message}`;
+    message.hidden = false;
+  });
 request("/api/auth/me")
   .then((result) => enterPortal(result.data))
   .catch(() => showAuthentication());

@@ -1,8 +1,10 @@
 const { randomUUID } = require("node:crypto");
+const { nextRequestId } = require("../services/requestIds");
+const { nextPaymentId } = require("../services/paymentIds");
 
 const editableFieldsFor = (Model) =>
     Object.keys(Model.schema.paths).filter(
-        (field) => field !== "_id" && field !== "__v" && !field.includes(".")
+        (field) => field !== "_id" && field !== "__v" && field !== "request_id" && !field.includes(".")
     );
 
 const pickEditableFields = (Model, body) => {
@@ -69,6 +71,12 @@ const createResourceController = (Model, resourceName) => ({
     create: async (req, res) => {
         try {
             const fields = pickEditableFields(Model, req.body);
+            if (Model.modelName === "Pickup") {
+                fields.request_id = await nextRequestId();
+            }
+            if (Model.modelName === "Payment") {
+                fields.payment_id = await nextPaymentId();
+            }
             const record = await Model.create({
                 _id: req.body._id || randomUUID(),
                 ...fields

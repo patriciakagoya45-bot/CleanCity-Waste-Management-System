@@ -19,6 +19,10 @@ const createCrudRoutes = require("./routes/crudRoutes");
 const authRoutes = require("./routes/authRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const portalRoutes = require("./routes/portalRoutes");
+const referenceRoutes = require("./routes/referenceRoutes");
+const { ensureRequestIds } = require("./services/requestIds");
+const { ensurePaymentIds } = require("./services/paymentIds");
+const { ensureCollectorIds } = require("./services/collectorIds");
 
 // Initialize Express
 const app = express();
@@ -29,6 +33,7 @@ app.use(express.json());
 
 // Authentication and role-specific portals
 app.use("/api/auth", authRoutes);
+app.use("/api/reference", referenceRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/portal", portalRoutes);
 
@@ -60,18 +65,26 @@ app.get("/api/status", (req, res) => {
 const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || "0.0.0.0";
 
+
 const startServer = async () => {
     try {
         await connectDB();
+        await ensureRequestIds();
+        await ensurePaymentIds();
+        await ensureCollectorIds();
         app.listen(PORT, HOST, () => {
             console.log(`CleanCity server running at http://localhost:${PORT}`);
+
             if (HOST === "0.0.0.0" || HOST === "::") {
-                console.log(`For other devices on this network, use this computer's local IP address and port ${PORT}.`);
+                console.log(
+                    `For other devices on this network, use this computer's local IP address and port ${PORT}.`
+                );
             }
         });
+
     } catch (error) {
         console.error("Failed to start CleanCity server:", error.message);
-        process.exitCode = 1;
+        process.exit(1);
     }
 };
 

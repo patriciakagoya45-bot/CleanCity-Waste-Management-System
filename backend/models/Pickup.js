@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 
 const pickupSchema = new mongoose.Schema({
     _id: { type: String, required: true },
+    request_id: { type: String, unique: true, sparse: true },
     household_id: { type: String, required: true },
     collector_id: { type: String, default: "" },
     dumpsite_id: { type: String, default: "" },

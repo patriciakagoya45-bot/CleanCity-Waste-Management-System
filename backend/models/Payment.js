@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 
 const paymentSchema = new mongoose.Schema({
     _id: { type: String, required: true },
+    payment_id: { type: String, unique: true, sparse: true },
     pickup_id: { type: String, required: true },
     household_id: { type: String, required: true },
     amount_ugx: { type: Number, required: true, min: 1 },

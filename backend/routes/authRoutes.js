@@ -8,6 +8,7 @@ router.post("/login", authController.login);
 router.post("/register/household", authController.registerHousehold);
 router.post("/register/claim-household", authController.claimHousehold);
 router.get("/me", requireAuth, authController.getCurrentAccount);
+router.post("/change-password", requireAuth, authController.changePassword);
 router.post("/logout", requireAuth, authController.logout);
 
 module.exports = router;

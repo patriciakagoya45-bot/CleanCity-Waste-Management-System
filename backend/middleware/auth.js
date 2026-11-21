@@ -24,6 +24,11 @@ const requireAuth = async (req, res, next) => {
             sessions.delete(sessionId);
             return res.status(401).json({ success: false, message: "This account is inactive" });
         }
+        if (session.passwordVersion !== undefined &&
+            session.passwordVersion !== (account.passwordVersion || 0)) {
+            sessions.delete(sessionId);
+            return res.status(401).json({ success: false, message: "Password changed; please sign in again" });
+        }
 
         req.user = {
             id: account._id,
@@ -31,7 +36,8 @@ const requireAuth = async (req, res, next) => {
             email: account.email,
             name: account.name,
             role: account.role,
-            linkedId: account.linkedId
+            linkedId: account.linkedId,
+            mustChangePassword: account.mustChangePassword
         };
         req.sessionId = sessionId;
         return next();
@@ -41,6 +47,12 @@ const requireAuth = async (req, res, next) => {
 };
 
 const requireRole = (...roles) => (req, res, next) => {
+    if (req.user?.mustChangePassword) {
+        return res.status(403).json({
+            success: false,
+            message: "Change your temporary password before continuing"
+        });
+    }
     if (!req.user || !roles.includes(req.user.role)) {
         return res.status(403).json({
             success: false,

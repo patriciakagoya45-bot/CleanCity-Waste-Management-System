@@ -1,4 +1,4 @@
-const { randomUUID } = require("node:crypto");
+const { randomBytes, randomUUID } = require("node:crypto");
 const mongoose = require("mongoose");
 const Account = require("../models/Account");
 const Household = require("../models/Household");
@@ -6,7 +6,9 @@ const Collector = require("../models/Collector");
 const Pickup = require("../models/Pickup");
 const Payment = require("../models/Payment");
 const Complaint = require("../models/Complaint");
-const { createAccount, publicAccount } = require("./authController");
+const { createAccount, publicAccount, setAccountPassword } = require("./authController");
+const { nextCollectorId } = require("../services/collectorIds");
+const { nextPaymentId } = require("../services/paymentIds");
 
 const fail = (res, error) => {
     console.error("Administrator request failed:", error.message);
@@ -49,11 +51,15 @@ const registerCollector = async (req, res) => {
         }
 
         if (collectorId) {
-            collector = await Collector.findById(String(collectorId).trim());
+            const rawCollectorId = String(collectorId).trim();
+            collector = await Collector.findOne({
+                $or: [{ _id: rawCollectorId }, { collector_id: rawCollectorId.toUpperCase() }]
+            });
             if (!collector) return res.status(404).json({ success: false, message: "Existing collector not found" });
         } else {
             collector = await Collector.create({
                 _id: `C-${randomUUID()}`,
+                collector_id: await nextCollectorId(),
                 name: String(name).trim(),
                 phone: String(phone).trim(),
                 vehicle: String(vehicle).trim(),
@@ -63,14 +69,21 @@ const registerCollector = async (req, res) => {
             isNewCollector = true;
         }
 
-        if (await Account.exists({ $or: [{ loginId: collector._id }, { linkedId: collector._id, role: "collector" }] })) {
+        const publicCollectorId = collector.collector_id || collector._id;
+        if (await Account.exists({
+            $or: [
+                { loginId: collector._id },
+                { loginId: publicCollectorId },
+                { linkedId: collector._id, role: "collector" }
+            ]
+        })) {
             if (isNewCollector) await Collector.deleteOne({ _id: collector._id });
             return res.status(409).json({ success: false, message: "This collector already has a login" });
         }
 
         try {
             const account = await createAccount({
-                loginId: collector._id,
+                loginId: publicCollectorId,
                 email,
                 name: collector.name,
                 role: "collector",
@@ -101,6 +114,35 @@ const deleteUser = async (req, res) => {
         account.active = false;
         await account.save();
         res.json({ success: true, message: "User login deactivated; associated service records were retained" });
+    } catch (error) {
+        fail(res, error);
+    }
+};
+
+const resetUserPassword = async (req, res) => {
+    try {
+        if ((req.body || {}).identityVerified !== true) {
+            return res.status(400).json({
+                success: false,
+                message: "Verify the user's identity against their registered details before resetting the password"
+            });
+        }
+        const account = await Account.findById(req.params.id);
+        if (!account) return res.status(404).json({ success: false, message: "User not found" });
+        if (!account.active) {
+            return res.status(400).json({ success: false, message: "Reactivate this account before resetting its password" });
+        }
+
+        const temporaryPassword = randomBytes(18).toString("base64url");
+        await setAccountPassword(account, temporaryPassword, true);
+        res.json({
+            success: true,
+            message: "Temporary password created. The user must change it after signing in.",
+            data: {
+                account: publicAccount(account),
+                temporaryPassword
+            }
+        });
     } catch (error) {
         fail(res, error);
     }
@@ -205,7 +247,17 @@ const updateRequest = async (req, res) => {
 const listPayments = async (req, res) => {
     try {
         const payments = await Payment.find().sort({ payment_date: -1 });
-        res.json({ success: true, count: payments.length, data: payments });
+        const pickups = await Pickup.find({ _id: { $in: payments.map((payment) => payment.pickup_id) } })
+            .select("_id request_id");
+        const requestIdByPickupId = new Map(pickups.map((pickup) => [pickup._id, pickup.request_id || pickup._id]));
+        res.json({
+            success: true,
+            count: payments.length,
+            data: payments.map((payment) => ({
+                ...payment.toObject(),
+                request_id: requestIdByPickupId.get(payment.pickup_id) || payment.pickup_id
+            }))
+        });
     } catch (error) {
         fail(res, error);
     }
@@ -214,7 +266,10 @@ const listPayments = async (req, res) => {
 const recordPayment = async (req, res) => {
     try {
         const body = req.body || {};
-        const pickup = await Pickup.findById(String(body.pickup_id || "").trim());
+        const pickupId = String(body.pickup_id || "").trim();
+        const pickup = await Pickup.findOne({
+            $or: [{ _id: pickupId }, { request_id: pickupId.toUpperCase() }]
+        });
         if (!pickup) return res.status(404).json({ success: false, message: "Collection request not found" });
         if (/cancelled/i.test(pickup.status)) {
             return res.status(400).json({ success: false, message: "Cancelled requests cannot receive payments" });
@@ -233,6 +288,7 @@ const recordPayment = async (req, res) => {
 
         const payment = await Payment.create({
             _id: randomUUID(),
+            payment_id: await nextPaymentId(),
             pickup_id: pickup._id,
             household_id: pickup.household_id,
             amount_ugx: amount,
@@ -310,6 +366,7 @@ module.exports = {
     listUsers,
     registerCollector,
     deleteUser,
+    resetUserPassword,
     listRequests,
     updateRequest,
     listPayments,

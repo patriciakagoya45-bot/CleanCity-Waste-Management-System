@@ -19,7 +19,9 @@ const accountSchema = new mongoose.Schema({
     linkedId: { type: String, required: true, trim: true },
     passwordHash: { type: String, required: true, select: false },
     passwordSalt: { type: String, required: true, select: false },
-    active: { type: Boolean, default: true }
+    active: { type: Boolean, default: true },
+    mustChangePassword: { type: Boolean, default: false },
+    passwordVersion: { type: Number, default: 0 }
 }, {
     collection: "accounts",
     timestamps: true,

@@ -34,6 +34,10 @@
         </label>
         <button class="button button-primary auth-submit" type="submit">Sign in</button>
         <p class="auth-help">Collectors and administrators receive their sign-in details from CleanCity management.</p>
+        <details class="auth-help">
+          <summary>Forgot your password?</summary>
+          <p>Contact a CleanCity administrator. They will verify your identity using your account ID and registered details, then provide a temporary password.</p>
+        </details>
       </form>
       <form class="auth-form" id="register-form" hidden>
         <label class="auth-field">Household registration
@@ -53,10 +57,14 @@
         </label>
         <div class="auth-form-grid" id="new-household-fields">
           <label class="auth-field">Division
-            <input name="division" type="text">
+            <select name="division" id="registration-division" required>
+              <option value="">Select a division</option>
+            </select>
           </label>
           <label class="auth-field">Parish
-            <input name="parish" type="text">
+            <select name="parish" id="registration-parish" required disabled>
+              <option value="">Select a division first</option>
+            </select>
           </label>
           <label class="auth-field">Collection plan
             <input name="plan" type="text" placeholder="e.g. weekly">
@@ -64,6 +72,12 @@
           <label class="auth-field auth-field-wide">Address
             <input name="address" type="text" autocomplete="street-address">
           </label>
+          <div class="auth-location auth-field-wide">
+            <button class="button button-secondary" id="registration-gps-button" type="button">Use my current location</button>
+            <span id="registration-gps-status" class="auth-help">GPS is optional. Your browser will ask permission.</span>
+            <input name="latitude" type="hidden">
+            <input name="longitude" type="hidden">
+          </div>
         </div>
         <label class="auth-field">Email
           <input name="email" type="email" autocomplete="email" required>
@@ -118,10 +132,12 @@
             <div>
               <p class="eyebrow">CLEAN CITY OPERATIONS</p>
               <h1>Dashboard</h1>
-              <p class="subtitle">Monitor collection activity and manage your waste services.</p>
+              <p class="subtitle" id="overview-subtitle">Monitor collection activity and manage your waste services.</p>
             </div>
             <button class="button button-primary" id="overview-add" type="button">＋ Add household</button>
           </div>
+
+          <section id="admin-dashboard-upgrade" class="admin-dashboard-upgrade" hidden></section>
 
           <div class="stat-grid" id="stats">
             <article class="stat-card"><span class="stat-icon mint" aria-hidden="true">♻</span><div><span class="stat-label">Waste collected</span><strong id="count-weight">—</strong><small>Total recorded weight (kg)</small></div></article>

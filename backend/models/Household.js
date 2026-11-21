@@ -8,6 +8,8 @@ const householdSchema = new mongoose.Schema({
     division: { type: String, required: true },
     parish: { type: String, required: true },
     address: { type: String, required: true },
+    latitude: { type: Number, min: -90, max: 90 },
+    longitude: { type: Number, min: -180, max: 180 },
     plan: { type: String, required: true },
 
     // Existing records use different date field names

@@ -4,6 +4,10 @@ const Collector = require("../models/Collector");
 const Pickup = require("../models/Pickup");
 const Payment = require("../models/Payment");
 const Complaint = require("../models/Complaint");
+const { wastePricesUgx, isValidServiceArea } = require("../config/referenceData");
+const { nextRequestId } = require("../services/requestIds");
+const { nextPaymentId } = require("../services/paymentIds");
+const { parseCoordinates } = require("./authController");
 
 const respondError = (res, error) => {
     console.error("Portal request failed:", error.message);
@@ -28,20 +32,25 @@ const requestPickup = async (req, res) => {
         if (!wasteType || Number.isNaN(pickupDate.getTime())) {
             return res.status(400).json({ success: false, message: "Choose a waste type and valid pickup date" });
         }
+        const normalizedWasteType = wasteType.toLowerCase();
+        if (!Object.hasOwn(wastePricesUgx, normalizedWasteType)) {
+            return res.status(400).json({ success: false, message: "Choose a supported waste type" });
+        }
         if (pickupDate < new Date(new Date().setHours(0, 0, 0, 0))) {
             return res.status(400).json({ success: false, message: "Pickup date cannot be in the past" });
         }
 
         const pickup = await Pickup.create({
             _id: randomUUID(),
+            request_id: await nextRequestId(),
             household_id: req.user.linkedId,
             collector_id: "",
             dumpsite_id: "",
             pickup_date: pickupDate,
-            waste_type: wasteType,
+            waste_type: normalizedWasteType,
             weight_kg: 0,
             status: "requested",
-            fee_ugx: 0
+            fee_ugx: wastePricesUgx[normalizedWasteType]
         });
         res.status(201).json({ success: true, data: pickup });
     } catch (error) {
@@ -60,7 +69,10 @@ const listHouseholdRequests = async (req, res) => {
 
 const cancelHouseholdRequest = async (req, res) => {
     try {
-        const pickup = await Pickup.findOne({ _id: req.params.id, household_id: req.user.linkedId });
+        const pickup = await Pickup.findOne({
+            household_id: req.user.linkedId,
+            $or: [{ request_id: req.params.id }, { _id: req.params.id }]
+        });
         if (!pickup) return res.status(404).json({ success: false, message: "Request not found" });
         if (/collected|completed|cancelled/i.test(pickup.status)) {
             return res.status(400).json({ success: false, message: "This request can no longer be cancelled" });
@@ -76,7 +88,14 @@ const cancelHouseholdRequest = async (req, res) => {
 const payForRequest = async (req, res) => {
     try {
         const body = req.body || {};
-        const pickup = await Pickup.findOne({ _id: req.params.id, household_id: req.user.linkedId });
+        const requestReference = String(req.params.id || "").trim();
+        const pickup = await Pickup.findOne({
+            household_id: req.user.linkedId,
+            $or: [
+                { request_id: requestReference.toUpperCase() },
+                { _id: requestReference }
+            ]
+        });
         if (!pickup) return res.status(404).json({ success: false, message: "Request not found" });
         if (/cancelled/i.test(pickup.status)) {
             return res.status(400).json({ success: false, message: "Cancelled requests cannot be paid" });
@@ -96,6 +115,7 @@ const payForRequest = async (req, res) => {
         if (!method) return res.status(400).json({ success: false, message: "Select a payment method" });
         const payment = await Payment.create({
             _id: randomUUID(),
+            payment_id: await nextPaymentId(),
             pickup_id: pickup._id,
             household_id: req.user.linkedId,
             amount_ugx: due,
@@ -113,7 +133,17 @@ const payForRequest = async (req, res) => {
 const listHouseholdPayments = async (req, res) => {
     try {
         const payments = await Payment.find({ household_id: req.user.linkedId }).sort({ payment_date: -1 });
-        res.json({ success: true, count: payments.length, data: payments });
+        const pickups = await Pickup.find({ _id: { $in: payments.map((payment) => payment.pickup_id) } })
+            .select("_id request_id");
+        const requestIdByPickupId = new Map(pickups.map((pickup) => [pickup._id, pickup.request_id || pickup._id]));
+        res.json({
+            success: true,
+            count: payments.length,
+            data: payments.map((payment) => ({
+                ...payment.toObject(),
+                request_id: requestIdByPickupId.get(payment.pickup_id) || payment.pickup_id
+            }))
+        });
     } catch (error) {
         respondError(res, error);
     }
@@ -148,22 +178,40 @@ const listHouseholdComplaints = async (req, res) => {
 const updateHouseholdAddress = async (req, res) => {
     try {
         const body = req.body || {};
+        const household = await Household.findById(req.user.linkedId);
+        if (!household) return res.status(404).json({ success: false, message: "Household not found" });
         const changes = {};
         ["address", "division", "parish"].forEach((field) => {
             if (typeof body[field] === "string" && body[field].trim()) {
                 changes[field] = body[field].trim();
             }
         });
-        if (Object.keys(changes).length === 0) {
+        const division = changes.division || household.division;
+        const parish = changes.parish || household.parish;
+        if (!isValidServiceArea(division, parish)) {
+            return res.status(400).json({ success: false, message: "Choose a parish within the selected division" });
+        }
+        const coordinates = parseCoordinates(body);
+        if (coordinates === false) {
+            return res.status(400).json({ success: false, message: "Provide valid GPS coordinates or leave both empty" });
+        }
+        if (coordinates) Object.assign(changes, coordinates);
+        if (body.clearLocation === true) {
+            delete changes.latitude;
+            delete changes.longitude;
+        }
+        if (Object.keys(changes).length === 0 && body.clearLocation !== true) {
             return res.status(400).json({ success: false, message: "Provide an address, division, or parish" });
         }
-        const household = await Household.findByIdAndUpdate(
+        const updatedHousehold = await Household.findByIdAndUpdate(
             req.user.linkedId,
-            { $set: changes },
+            {
+                $set: changes,
+                ...(body.clearLocation === true ? { $unset: { latitude: 1, longitude: 1 } } : {})
+            },
             { new: true, runValidators: true }
         );
-        if (!household) return res.status(404).json({ success: false, message: "Household not found" });
-        res.json({ success: true, data: household });
+        res.json({ success: true, data: updatedHousehold });
     } catch (error) {
         respondError(res, error);
     }
